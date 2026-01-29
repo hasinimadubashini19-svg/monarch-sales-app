@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, deleteDoc, updateDoc, query, orderBy } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, deleteDoc, updateDoc, query, orderBy, where, enableIndexedDbPersistence } from 'firebase/firestore';
 import { LayoutDashboard, Store, FileText, Plus, X, Trash2, Crown, Settings, LogOut, Search, UserCircle, Send, MapPin, Edit3 } from 'lucide-react';
 
+// --- FIREBASE CONFIGURATION ---
 const firebaseConfig = {
   apiKey: "AIzaSyA7vsja2a74dFZj1qdItzq2k6kWocXBvTU",
   authDomain: "monarch-sales.firebaseapp.com",
@@ -17,10 +18,15 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = 'sales-monarch-pro-v3';
 
-const getColRef = (col) => collection(db, 'artifacts', appId, 'public', 'data', col);
-const getDocRef = (col, id) => doc(db, 'artifacts', appId, 'public', 'data', col, id);
+// 1. OFFLINE SUPPORT ENABLE (සිග්නල් නැති වෙලාවට වැඩ කරන්න)
+try {
+  enableIndexedDbPersistence(db);
+} catch (err) {
+  console.warn("Persistence failed:", err.code);
+}
+
+const appId = 'sales-monarch-pro-v3'; 
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -40,15 +46,35 @@ export default function App() {
     return unsub;
   }, []);
 
+  // 2. DATA LOADING WITH PRIVACY & ORDERING (User ID එක අනුව සහ දාපු පිළිවෙළට)
   useEffect(() => {
     if (!user) return;
     const cols = ['routes', 'shops', 'orders', 'expenses', 'brands', 'settings'];
-    const unsubs = cols.map(c => onSnapshot(getColRef(c), s => setData(prev => ({ ...prev, [c]: s.docs.map(d => ({ id: d.id, ...d.data() })) }))));
+    const unsubs = cols.map(c => {
+      // මෙතන orderBy("timestamp", "asc") දාලා තියෙන්නේ ඔයා දාන පිළිවෙළටම පේන්න
+      const q = query(
+        collection(db, 'artifacts', appId, 'public', 'data', c), 
+        where("userId", "==", user.uid), 
+        orderBy("timestamp", "asc")
+      );
+      return onSnapshot(q, s => setData(prev => ({ ...prev, [c]: s.docs.map(d => ({ id: d.id, ...d.data() })) })));
+    });
     return () => unsubs.forEach(f => f());
   }, [user]);
 
-  const addItem = async (col, payload) => { await addDoc(getColRef(col), { ...payload, date: new Date().toLocaleDateString(), timestamp: Date.now() }); setShowModal(null); };
-  const deleteItem = async (col, id) => { if(confirm("Are you sure?")) await deleteDoc(getDocRef(col, id)); };
+  const addItem = async (col, payload) => { 
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', col), { 
+      ...payload, 
+      userId: user.uid, // අයිතිකරු හඳුනාගැනීමට
+      date: new Date().toLocaleDateString(), 
+      timestamp: Date.now() 
+    }); 
+    setShowModal(null); 
+  };
+
+  const deleteItem = async (col, id) => { 
+    if(confirm("Are you sure?")) await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', col, id)); 
+  };
 
   const submitOrder = async () => {
     const items = Object.entries(cart).filter(([_, qty]) => qty > 0).map(([id, qty]) => {
@@ -57,8 +83,16 @@ export default function App() {
     });
     if (items.length === 0) return alert("Cart is empty!");
     const total = items.reduce((s, i) => s + i.subtotal, 0);
-    const orderData = { shopId: selectedShop.id, shopName: selectedShop.name, items, total, date: new Date().toLocaleDateString(), timestamp: Date.now() };
-    const docRef = await addDoc(getColRef('orders'), orderData);
+    const orderData = { 
+        userId: user.uid,
+        shopId: selectedShop.id, 
+        shopName: selectedShop.name, 
+        items, 
+        total, 
+        date: new Date().toLocaleDateString(), 
+        timestamp: Date.now() 
+    };
+    const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'orders'), orderData);
     setLastOrder({ id: docRef.id, ...orderData });
     setCart({}); setShowModal('receipt');
   };
@@ -72,7 +106,7 @@ export default function App() {
 
   const repProfile = data.settings.find(s => s.type === 'rep') || { name: 'New Rep' };
   const todayOrders = useMemo(() => data.orders.filter(o => o.date === new Date().toLocaleDateString()), [data.orders]);
-
+  
   const brandSummary = useMemo(() => {
     const summary = {};
     todayOrders.forEach(order => order.items.forEach(item => {
@@ -93,7 +127,7 @@ export default function App() {
         <h1 className="text-2xl font-black italic text-white mb-8 tracking-tighter uppercase">Monarch</h1>
         <form onSubmit={async (e) => {
           e.preventDefault();
-          try {
+          try { 
             if (authMode === 'login') await signInWithEmailAndPassword(auth, e.target.email.value, e.target.password.value);
             else await createUserWithEmailAndPassword(auth, e.target.email.value, e.target.password.value);
           } catch (err) { alert(err.message); }
@@ -203,7 +237,7 @@ export default function App() {
           <div className="space-y-6">
             <section className="bg-[#0f0f0f] p-6 rounded-[2.5rem] border border-white/5">
               <h3 className="text-[10px] font-black text-[#d4af37] uppercase tracking-widest mb-4">Rep Profile</h3>
-              <form onSubmit={e => { e.preventDefault(); addItem('settings', { type: 'rep', name: e.target.rep.value.toUpperCase(), id: repProfile.id || Date.now() }) }} className="flex gap-2">
+              <form onSubmit={e => { e.preventDefault(); addItem('settings', { type: 'rep', name: e.target.rep.value.toUpperCase() }) }} className="flex gap-2">
                 <input name="rep" defaultValue={repProfile.name} placeholder="Rep Name" className="flex-1 bg-black p-4 rounded-2xl border border-white/5 text-xs font-bold uppercase" required />
                 <button className="bg-[#d4af37] px-6 rounded-2xl text-black font-black text-[9px] uppercase">Update</button>
               </form>
@@ -315,7 +349,7 @@ export default function App() {
         </div>
       )}
 
-      {/* SYSTEM MODALS (Route, Shop, Brand, Expense) */}
+      {/* SYSTEM MODALS */}
       {['route', 'shop', 'brand', 'expense'].includes(showModal) && (
         <div className="fixed inset-0 bg-black/95 z-[100] flex items-center justify-center p-8 backdrop-blur-md animate-in zoom-in duration-300">
           <div className="bg-[#0f0f0f] w-full p-8 rounded-[3rem] border border-white/5">
