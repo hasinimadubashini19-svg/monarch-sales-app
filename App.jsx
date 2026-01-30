@@ -1,400 +1,301 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, collection, onSnapshot, addDoc, deleteDoc, query, orderBy, where, enableIndexedDbPersistence } from 'firebase/firestore';
-import { LayoutDashboard, Store, FileText, Plus, X, Trash2, Crown, Settings, LogOut, Search, Send, MapPin, Receipt, Package, Wallet } from 'lucide-react';
+import { db } from './firebase'; // ඔයාගේ firebase config එක
+import { 
+  collection, onSnapshot, addDoc, deleteDoc, doc, query, orderBy, enableIndexedDbPersistence 
+} from 'firebase/firestore';
+import { 
+  LayoutDashboard, Store, ShoppingBag, History, Settings, 
+  Plus, Minus, Trash2, Send, Calendar, Sun, Moon, Briefcase, User
+} from 'lucide-react';
 
-// --- FIREBASE CONFIGURATION ---
-const firebaseConfig = {
-  apiKey: "AIzaSyA7vsja2a74dFZj1qdItzq2k6kWocXBvTU",
-  authDomain: "monarch-sales.firebaseapp.com",
-  projectId: "monarch-sales",
-  storageBucket: "monarch-sales.firebasestorage.app",
-  messagingSenderId: "1011640493770",
-  appId: "1:1011640493770:web:93b0f64719c77f16897633",
-  measurementId: "G-CVZ5B22GYC"
-};
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-
-// 1. OFFLINE SUPPORT (Signal nathi thanwala wada karanna)
+// Offline Persistence (Internet නැතිව වැඩ කිරීමට)
 try {
   enableIndexedDbPersistence(db);
 } catch (err) {
-  console.warn("Offline persistence error:", err.code);
+  console.log("Persistence failed");
 }
 
-const appId = 'monarch-v4-pro';
+const App = () => {
+  // --- States ---
+  const [activeTab, setActiveTab] = useState('dash');
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [searchDate, setSearchDate] = useState(new Date().toLocaleDateString());
+  const [data, setData] = useState({ shops: [], brands: [], orders: [], expenses: [], routes: [] });
+  const [profile, setProfile] = useState({ 
+    repName: localStorage.getItem('repName') || 'Sales Rep', 
+    company: localStorage.getItem('company') || 'My Company' 
+  });
 
-export default function App() {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [authMode, setAuthMode] = useState('login');
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [data, setData] = useState({ routes: [], shops: [], orders: [], expenses: [], brands: [], settings: [] });
-  const [selectedRouteId, setSelectedRouteId] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [cart, setCart] = useState({});
-  const [selectedShop, setSelectedShop] = useState(null);
-  const [showModal, setShowModal] = useState(null);
-  const [lastOrder, setLastOrder] = useState(null);
+  // Order Form State
+  const [orderForm, setOrderForm] = useState({ shop: '', items: {} });
 
+  // --- Real-time Data Fetching ---
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => { setUser(u); setTimeout(() => setLoading(false), 1000); });
-    return unsub;
+    const collections = ['shops', 'brands', 'orders', 'expenses', 'routes'];
+    const unsubscribes = collections.map(col => 
+      onSnapshot(query(collection(db, col)), (snap) => {
+        setData(prev => ({ ...prev, [col]: snap.docs.map(d => ({ id: d.id, ...d.data() })) }));
+      })
+    );
+    return () => unsubscribes.forEach(unsub => unsub());
   }, []);
 
-  // 2. PRIVACY & SORTING (User id anuwa saha dāpu piliwalata data gannawa)
-  useEffect(() => {
-    if (!user) return;
-    const collections = ['routes', 'shops', 'orders', 'expenses', 'brands', 'settings'];
-    const unsubs = collections.map(c => {
-      const q = query(
-        collection(db, 'artifacts', appId, 'data', c),
-        where("userId", "==", user.uid),
-        orderBy("timestamp", "asc")
-      );
-      return onSnapshot(q, s => setData(prev => ({ ...prev, [c]: s.docs.map(d => ({ id: d.id, ...d.data() })) })));
-    });
-    return () => unsubs.forEach(f => f());
-  }, [user]);
+  // --- Calculations ---
+  const stats = useMemo(() => {
+    const now = new Date();
+    const todayStr = now.toLocaleDateString();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
 
-  const addItem = async (col, payload) => {
-    await addDoc(collection(db, 'artifacts', appId, 'data', col), {
-      ...payload,
-      userId: user.uid,
-      date: new Date().toLocaleDateString(),
-      timestamp: Date.now()
+    const todayOrders = data.orders.filter(o => o.date === todayStr);
+    const monthOrders = data.orders.filter(o => {
+      const d = new Date(o.date);
+      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
     });
-    setShowModal(null);
-  };
 
-  const deleteItem = async (col, id) => {
-    if (confirm("Mēka ain karannada?")) await deleteDoc(doc(db, 'artifacts', appId, 'data', col, id));
-  };
+    const calcTotal = (orders) => orders.reduce((sum, o) => sum + (o.total || 0), 0);
 
-  const submitOrder = async () => {
-    const items = Object.entries(cart).filter(([_, qty]) => qty > 0).map(([id, qty]) => {
-      const b = data.brands.find(x => x.id === id);
-      return { name: b.name, size: b.size, price: b.price, qty, subtotal: b.price * qty };
-    });
-    if (items.length === 0) return alert("Cart eka فاضියි!");
-    const total = items.reduce((s, i) => s + i.subtotal, 0);
-    const orderData = {
-      userId: user.uid,
-      shopId: selectedShop.id,
-      shopName: selectedShop.name,
+    // Brand wise Breakdown
+    const getBrandStats = (orders) => {
+      const bStats = {};
+      orders.forEach(o => {
+        o.items?.forEach(i => {
+          if (!bStats[i.name]) bStats[i.name] = { units: 0, revenue: 0 };
+          bStats[i.name].units += Number(i.qty);
+          bStats[i.name].revenue += Number(i.subtotal);
+        });
+      });
+      return bStats;
+    };
+
+    return {
+      todaySales: calcTotal(todayOrders),
+      monthSales: calcTotal(monthOrders),
+      todayExpenses: data.expenses.filter(e => e.date === todayStr).reduce((sum, e) => sum + (e.amount || 0), 0),
+      todayBrandStats: getBrandStats(todayOrders),
+      monthBrandStats: getBrandStats(monthOrders)
+    };
+  }, [data, searchDate]);
+
+  // --- Actions ---
+  const saveOrder = async () => {
+    if (!orderForm.shop) return alert("Select Shop");
+    const items = Object.entries(orderForm.items)
+      .filter(([_, qty]) => qty > 0)
+      .map(([name, qty]) => {
+        const brand = data.brands.find(b => b.name === name);
+        return { name, qty, subtotal: qty * brand.price };
+      });
+
+    const total = items.reduce((sum, i) => sum + i.subtotal, 0);
+    await addDoc(collection(db, 'orders'), {
+      shopName: orderForm.shop,
       items,
       total,
       date: new Date().toLocaleDateString(),
-      timestamp: Date.now()
-    };
-    const docRef = await addDoc(collection(db, 'artifacts', appId, 'data', 'orders'), orderData);
-    setLastOrder({ id: docRef.id, ...orderData });
-    setCart({}); setShowModal('receipt');
+      status: 'PAID',
+      rep: profile.repName
+    });
+    setOrderForm({ shop: '', items: {} });
+    setActiveTab('history');
   };
 
   const shareWhatsApp = (order) => {
-    let msg = `*MONARCH SALES*%0A*Shop:* ${order.shopName}%0A*Date:* ${order.date}%0A------------------%0A`;
-    order.items.forEach(i => msg += `${i.name} (${i.size}) x ${i.qty} = ${i.subtotal.toFixed(2)}%0A`);
-    msg += `------------------%0A*TOTAL: Rs.${order.total.toFixed(2)}*`;
-    window.open(`https://wa.me/?text=${msg}`, '_blank');
+    const text = `*${profile.company}*\n*Rep:* ${profile.repName}\n*Shop:* ${order.shopName}\n----------\n` + 
+      order.items.map(i => `${i.name} x ${i.qty} = ${i.subtotal}`).join('\n') + 
+      `\n----------\n*Total: Rs.${order.total}*`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`);
   };
 
-  // Logic Calculations
-  const repProfile = data.settings.find(s => s.type === 'rep') || { name: 'New Rep' };
-  const todayOrders = useMemo(() => data.orders.filter(o => o.date === new Date().toLocaleDateString()), [data.orders]);
-  const brandSummary = useMemo(() => {
-    const summary = {};
-    todayOrders.forEach(order => order.items.forEach(item => {
-      const key = `${item.name} (${item.size})`;
-      if (!summary[key]) summary[key] = { qty: 0, total: 0 };
-      summary[key].qty += item.qty;
-      summary[key].total += item.subtotal;
-    }));
-    return Object.entries(summary);
-  }, [todayOrders]);
+  const deleteItem = async (col, id) => {
+    if(window.confirm("Delete this record?")) await deleteDoc(doc(db, col, id));
+  };
 
-  if (loading) return <div className="min-h-screen bg-black flex flex-col items-center justify-center text-[#d4af37] font-black italic animate-pulse"><Crown size={60} className="mb-4" />MONARCH</div>;
+  // --- Styles ---
+  const theme = isDarkMode 
+    ? "bg-black text-white" 
+    : "bg-gray-50 text-gray-900";
+  const card = isDarkMode ? "bg-[#0f0f0f] border-white/5" : "bg-white border-gray-200 shadow-sm";
 
-  if (!user) return (
-    <div className="min-h-screen bg-[#050505] flex items-center justify-center p-6">
-      <div className="w-full max-w-sm bg-[#0f0f0f] p-10 rounded-[3rem] border border-white/5 text-center shadow-2xl">
-        <Crown className="text-[#d4af37] mx-auto mb-4" size={48} />
-        <h1 className="text-2xl font-black italic text-white mb-8 tracking-tighter uppercase">Monarch</h1>
-        <form onSubmit={async (e) => {
-          e.preventDefault();
-          try {
-            if (authMode === 'login') await signInWithEmailAndPassword(auth, e.target.email.value, e.target.password.value);
-            else await createUserWithEmailAndPassword(auth, e.target.email.value, e.target.password.value);
-          } catch (err) { alert(err.message); }
-        }} className="space-y-4">
-          <input name="email" type="email" placeholder="Email" className="w-full bg-black p-4 rounded-2xl border border-white/5 outline-none text-white text-sm" required />
-          <input name="password" type="password" placeholder="Password" className="w-full bg-black p-4 rounded-2xl border border-white/5 outline-none text-white text-sm" required />
-          <button className="w-full py-4 bg-[#d4af37] text-black font-black rounded-2xl uppercase tracking-widest text-[10px] shadow-lg shadow-[#d4af37]/20">{authMode === 'login' ? 'Sign In' : 'Register'}</button>
-        </form>
-        <button onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')} className="mt-6 text-[9px] text-white/30 uppercase font-black tracking-widest underline">{authMode === 'login' ? "Create Account" : "Back to Login"}</button>
+  return (
+    <div className={`min-h-screen pb-24 transition-colors duration-500 font-sans ${theme}`}>
+      
+      {/* Header & Mode Toggle */}
+      <div className="p-6 flex justify-between items-center">
+        <div>
+          <h1 className="text-xl font-black tracking-tighter flex items-center gap-2">
+            <div className="w-8 h-8 bg-[#d4af37] rounded-lg flex items-center justify-center">
+              <Briefcase size={18} className="text-black"/>
+            </div>
+            MONARCH <span className="text-[#d4af37]">PRO</span>
+          </h1>
+        </div>
+        <button onClick={() => setIsDarkMode(!isDarkMode)} className={`p-2 rounded-full ${card}`}>
+          {isDarkMode ? <Sun size={20} className="text-yellow-500"/> : <Moon size={20}/>}
+        </button>
+      </div>
+
+      <div className="px-6 space-y-6">
+        
+        {/* --- DASHBOARD TAB --- */}
+        {activeTab === 'dash' && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className={`${card} p-4 rounded-3xl border`}>
+                <p className="text-[10px] uppercase font-black opacity-40">Today Sales</p>
+                <h2 className="text-lg font-black">Rs.{stats.todaySales}</h2>
+              </div>
+              <div className={`${card} p-4 rounded-3xl border`}>
+                <p className="text-[10px] uppercase font-black opacity-40">Month Sales</p>
+                <h2 className="text-lg font-black">Rs.{stats.monthSales}</h2>
+              </div>
+            </div>
+
+            {/* Today Brand Breakdown */}
+            <div className={`${card} p-5 rounded-[2.5rem] border`}>
+              <h3 className="text-xs font-black uppercase mb-4 text-[#d4af37]">Today Brand Summary</h3>
+              <div className="space-y-3">
+                {Object.entries(stats.todayBrandStats).map(([name, s]) => (
+                  <div key={name} className="flex justify-between items-center">
+                    <div>
+                      <p className="text-xs font-bold uppercase">{name}</p>
+                      <p className="text-[10px] opacity-40">{s.units} Units Sold</p>
+                    </div>
+                    <p className="font-black text-xs">Rs.{s.revenue}</p>
+                  </div>
+                ))}
+                {Object.keys(stats.todayBrandStats).length === 0 && <p className="text-[10px] opacity-20 italic">No sales today</p>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- SHOPS / ORDER TAB --- */}
+        {activeTab === 'shops' && (
+          <div className="space-y-4 animate-in fade-in">
+            <select 
+              className={`w-full p-4 rounded-2xl border outline-none font-bold text-xs uppercase ${card}`}
+              onChange={(e) => setOrderForm({...orderForm, shop: e.target.value})}
+            >
+              <option value="">Select Shop</option>
+              {data.shops.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+            </select>
+
+            <div className="space-y-3">
+              {data.brands.map(b => (
+                <div key={b.id} className={`${card} p-4 rounded-3xl border flex justify-between items-center`}>
+                  <div>
+                    <h4 className="text-xs font-black uppercase">{b.name}</h4>
+                    <p className="text-[10px] opacity-40">Rs.{b.price}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={() => setOrderForm(prev => ({...prev, items: {...prev.items, [b.name]: Math.max(0, (prev.items[b.name]||0) - 1)}}))}
+                      className="p-2 bg-red-500/10 text-red-500 rounded-full"><Minus size={14}/>
+                    </button>
+                    <input 
+                      type="number"
+                      className="w-12 bg-transparent text-center font-black text-sm outline-none"
+                      value={orderForm.items[b.name] || 0}
+                      onChange={(e) => setOrderForm(prev => ({...prev, items: {...prev.items, [b.name]: parseInt(e.target.value) || 0}}))}
+                    />
+                    <button 
+                      onClick={() => setOrderForm(prev => ({...prev, items: {...prev.items, [b.name]: (prev.items[b.name]||0) + 1}}))}
+                      className="p-2 bg-green-500/10 text-green-500 rounded-full"><Plus size={14}/>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button onClick={saveOrder} className="w-full bg-[#d4af37] text-black font-black py-4 rounded-2xl shadow-xl shadow-yellow-500/10">SAVE ORDER</button>
+          </div>
+        )}
+
+        {/* --- HISTORY TAB (Calendar Fix Included) --- */}
+        {activeTab === 'history' && (
+          <div className="space-y-4 animate-in fade-in">
+            <div className={`${card} p-4 rounded-2xl border flex items-center gap-3`}>
+              <Calendar size={18} className="text-[#d4af37]"/>
+              <input 
+                type="date" 
+                style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                className="bg-transparent outline-none w-full font-bold text-xs uppercase"
+                onChange={(e) => {
+                   if(e.target.value) {
+                     const [y, m, d] = e.target.value.split('-');
+                     setSearchDate(`${parseInt(m)}/${parseInt(d)}/${y}`);
+                   }
+                }}
+              />
+            </div>
+            <p className="text-[10px] font-black opacity-20 uppercase px-2">History For: {searchDate}</p>
+            {data.orders.filter(o => o.date === searchDate).map(o => (
+              <div key={o.id} className={`${card} p-5 rounded-[2rem] border`}>
+                <div className="flex justify-between items-start mb-3">
+                  <h4 className="text-xs font-black uppercase text-[#d4af37]">{o.shopName}</h4>
+                  <div className="flex gap-2">
+                    <button onClick={() => deleteItem('orders', o.id)} className="text-red-500/20"><Trash2 size={14}/></button>
+                    <button onClick={() => shareWhatsApp(o)} className="text-green-500"><Send size={14}/></button>
+                  </div>
+                </div>
+                {o.items.map((i, k) => <p key={k} className="text-[10px] opacity-50 uppercase">▪ {i.name} x {i.qty} = {i.subtotal}</p>)}
+                <div className="mt-3 pt-3 border-t border-white/5 flex justify-between font-black">
+                  <span className="text-[10px]">TOTAL</span>
+                  <span className="text-sm">Rs.{o.total}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* --- PROFILE / SETUP --- */}
+        {activeTab === 'setup' && (
+          <div className="space-y-6 animate-in fade-in">
+             <div className={`${card} p-6 rounded-[2.5rem] border space-y-4`}>
+                <h3 className="text-xs font-black uppercase text-[#d4af37]">Profile Settings</h3>
+                <input 
+                  placeholder="Rep Name" 
+                  className="w-full bg-transparent border-b border-white/10 p-2 outline-none text-sm"
+                  value={profile.repName}
+                  onChange={(e) => { setProfile({...profile, repName: e.target.value}); localStorage.setItem('repName', e.target.value); }}
+                />
+                <input 
+                  placeholder="Company Name" 
+                  className="w-full bg-transparent border-b border-white/10 p-2 outline-none text-sm"
+                  value={profile.company}
+                  onChange={(e) => { setProfile({...profile, company: e.target.value}); localStorage.setItem('company', e.target.value); }}
+                />
+             </div>
+             {/* Shops & Brands management sections can be added here similar to above */}
+          </div>
+        )}
+
+      </div>
+
+      {/* Footer Branding */}
+      <div className="fixed bottom-20 w-full text-center opacity-10 py-4">
+        <p className="text-[8px] font-black uppercase tracking-[0.2em]">for my love</p>
+      </div>
+
+      {/* Bottom Navigation */}
+      <div className={`fixed bottom-6 left-6 right-6 h-16 rounded-full border flex items-center justify-around px-4 shadow-2xl ${card} backdrop-blur-lg`}>
+        {[
+          { id: 'dash', icon: LayoutDashboard },
+          { id: 'shops', icon: Store },
+          { id: 'history', icon: History },
+          { id: 'setup', icon: Settings }
+        ].map(t => (
+          <button 
+            key={t.id}
+            onClick={() => setActiveTab(t.id)}
+            className={`p-3 rounded-full transition-all ${activeTab === t.id ? 'bg-[#d4af37] text-black scale-110' : 'opacity-40'}`}
+          >
+            <t.icon size={20} />
+          </button>
+        ))}
       </div>
     </div>
   );
+};
 
-  return (
-    <div className="min-h-screen bg-black text-white pb-32">
-      <header className="p-6 flex justify-between items-center border-b border-white/5 sticky top-0 bg-black/80 backdrop-blur-md z-40">
-        <div className="flex items-center gap-2"><Crown className="text-[#d4af37]" size={20}/><h1 className="text-lg font-black italic">MONARCH</h1></div>
-        <div className="flex items-center gap-4">
-          <span className="text-[9px] font-black uppercase text-[#d4af37] bg-[#d4af37]/10 px-3 py-1 rounded-full">{repProfile.name}</span>
-          <button onClick={() => signOut(auth)} className="p-2 text-red-500 bg-red-500/10 rounded-full"><LogOut size={16}/></button>
-        </div>
-      </header>
-
-      <main className="p-5 max-w-lg mx-auto">
-        {activeTab === 'dashboard' && (
-          <div className="space-y-6 animate-in fade-in duration-500">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-[#0f0f0f] p-5 rounded-[2.5rem] border border-white/5">
-                <p className="text-[8px] font-black text-white/20 uppercase tracking-widest mb-1">Today's Sales</p>
-                <p className="text-xl font-black text-[#d4af37]">Rs.{todayOrders.reduce((s,o)=>s+o.total,0).toFixed(2)}</p>
-              </div>
-              <div className="bg-[#0f0f0f] p-5 rounded-[2.5rem] border border-white/5">
-                <p className="text-[8px] font-black text-white/20 uppercase tracking-widest mb-1">Expenses</p>
-                <p className="text-xl font-black text-red-500">Rs.{data.expenses.filter(e => e.date === new Date().toLocaleDateString()).reduce((s,e)=>s+Number(e.amount),0).toFixed(2)}</p>
-              </div>
-            </div>
-
-            <section className="bg-[#0f0f0f] p-6 rounded-[2.5rem] border border-white/5 shadow-xl">
-              <h3 className="text-[10px] font-black text-[#d4af37] uppercase mb-4 tracking-widest flex items-center gap-2"><Package size={14}/> Today's Summary</h3>
-              <div className="space-y-3">
-                {brandSummary.length === 0 && <p className="text-[9px] text-white/10 italic text-center py-4">No sales recorded today</p>}
-                {brandSummary.map(([name, stats], idx) => (
-                  <div key={idx} className="flex justify-between items-center p-4 bg-black/40 rounded-2xl border border-white/5">
-                    <span className="text-[10px] font-bold text-white/70 uppercase">{name}</span>
-                    <div className="text-right">
-                      <span className="text-[10px] font-black text-[#d4af37]">{stats.qty} Units</span>
-                      <p className="text-[8px] text-white/20 font-bold tracking-tighter">Rs.{stats.total.toFixed(2)}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="bg-[#0f0f0f] p-6 rounded-[2.5rem] border border-white/5">
-              <h3 className="text-[10px] font-black text-white/40 uppercase mb-4 tracking-widest flex items-center gap-2"><Receipt size={14}/> Recent Orders</h3>
-              <div className="space-y-4">
-                {todayOrders.slice().reverse().map((order, idx) => (
-                  <div key={idx} className="border-b border-white/5 pb-4 last:border-0">
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="text-[10px] font-black uppercase text-[#d4af37]">{order.shopName}</span>
-                      <div className="flex items-center gap-3">
-                        <span className="text-[10px] font-black">Rs.{order.total.toFixed(2)}</span>
-                        <button onClick={() => deleteItem('orders', order.id)} className="text-red-500/20"><Trash2 size={12}/></button>
-                      </div>
-                    </div>
-                    {order.items.map((item, i) => (
-                      <p key={i} className="text-[8px] text-white/30 uppercase font-bold">• {item.name} x {item.qty} = Rs.{item.subtotal.toFixed(2)}</p>
-                    ))}
-                    <p className="text-[7px] text-white/10 mt-2 font-black tracking-widest uppercase italic">{order.date} | {new Date(order.timestamp).toLocaleTimeString()}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
-        )}
-
-        {activeTab === 'shops' && (
-          <div className="space-y-4 animate-in slide-in-from-right duration-500">
-            <div className="flex gap-2 overflow-x-auto pb-4 no-scrollbar">
-              <button onClick={() => setSelectedRouteId('all')} className={`px-6 py-3 rounded-full border text-[9px] font-black uppercase transition-all ${selectedRouteId === 'all' ? 'bg-[#d4af37] border-[#d4af37] text-black' : 'border-white/10 text-white/40'}`}>All Routes</button>
-              {data.routes.map(r => (
-                <button key={r.id} onClick={() => setSelectedRouteId(r.id)} className={`px-6 py-3 rounded-full border text-[9px] font-black uppercase transition-all ${selectedRouteId === r.id ? 'bg-[#d4af37] border-[#d4af37] text-black' : 'border-white/10 text-white/40'}`}>{r.name}</button>
-              ))}
-            </div>
-
-            <div className="flex gap-3">
-              <div className="flex-1 bg-[#0f0f0f] border border-white/5 rounded-2xl px-4 flex items-center gap-3"><Search size={14} className="text-white/20"/><input value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} placeholder="Search shop..." className="bg-transparent w-full py-4 text-xs outline-none text-white uppercase font-bold"/></div>
-              <button onClick={()=>setShowModal('shop')} className="bg-[#d4af37] px-4 rounded-2xl text-black"><Plus/></button>
-            </div>
-
-            {data.shops.filter(s=> (selectedRouteId === 'all' || s.routeId === selectedRouteId) && s.name.toLowerCase().includes(searchQuery.toLowerCase())).map(s => (
-              <div key={s.id} className="bg-[#0f0f0f] p-5 rounded-[2rem] border border-white/5 flex justify-between items-center group">
-                <div>
-                  <h4 className="text-xs font-black uppercase tracking-tight">{s.name}</h4>
-                  <div className="flex items-center gap-2 mt-1"><MapPin size={8} className="text-white/20"/><p className="text-[8px] text-white/20 uppercase font-bold">{s.area}</p></div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <button onClick={() => deleteItem('shops', s.id)} className="text-red-500/20"><Trash2 size={14}/></button>
-                  <button onClick={()=>{setSelectedShop(s); setShowModal('invoice');}} className="bg-[#d4af37] px-5 py-3 rounded-xl text-[9px] font-black text-black uppercase tracking-widest active:scale-95 transition-all">Billing</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {activeTab === 'settings' && (
-          <div className="space-y-6 animate-in slide-in-from-left duration-500">
-            <section className="bg-[#0f0f0f] p-6 rounded-[2.5rem] border border-white/5">
-              <h3 className="text-[10px] font-black text-[#d4af37] uppercase tracking-widest mb-4">Rep Profile</h3>
-              <form onSubmit={e => { e.preventDefault(); addItem('settings', { type: 'rep', name: e.target.rep.value.toUpperCase() }) }} className="flex gap-2">
-                <input name="rep" defaultValue={repProfile.name} placeholder="Rep Name" className="flex-1 bg-black p-4 rounded-2xl border border-white/5 text-xs font-bold uppercase" required />
-                <button className="bg-[#d4af37] px-6 rounded-2xl text-black font-black text-[9px] uppercase shadow-lg shadow-[#d4af37]/20">Update</button>
-              </form>
-            </section>
-
-            <section className="bg-[#0f0f0f] p-6 rounded-[2.5rem] border border-white/5">
-              <div className="flex justify-between items-center mb-6"><h3 className="text-[10px] font-black text-[#d4af37] uppercase tracking-widest flex items-center gap-2"><MapPin size={14}/> Territories</h3><button onClick={()=>setShowModal('route')} className="text-[#d4af37] bg-[#d4af37]/10 p-2 rounded-full"><Plus size={16}/></button></div>
-              <div className="grid grid-cols-2 gap-2">
-                {data.routes.map(r => (
-                  <div key={r.id} className="bg-black/40 p-3 rounded-2xl flex justify-between items-center border border-white/5">
-                    <span className="text-[9px] font-black uppercase text-white/60">{r.name}</span>
-                    <button onClick={()=>deleteItem('routes', r.id)} className="text-red-500/20"><Trash2 size={12}/></button>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="bg-[#0f0f0f] p-6 rounded-[2.5rem] border border-white/5">
-              <div className="flex justify-between items-center mb-6"><h3 className="text-[10px] font-black text-[#d4af37] uppercase tracking-widest flex items-center gap-2"><Package size={14}/> Brands List</h3><button onClick={()=>setShowModal('brand')} className="text-[#d4af37] bg-[#d4af37]/10 p-2 rounded-full"><Plus size={16}/></button></div>
-              <div className="space-y-3">
-                {data.brands.map(b => (
-                  <div key={b.id} className="flex justify-between items-center bg-black/40 p-4 rounded-2xl border border-white/5">
-                    <div><span className="text-[10px] font-bold uppercase text-white/80">{b.name}</span><p className="text-[8px] text-white/20 font-black tracking-widest">{b.size} • Rs.{b.price.toFixed(2)}</p></div>
-                    <button onClick={()=>deleteItem('brands', b.id)} className="text-red-500/20"><Trash2 size={12}/></button>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="bg-[#0f0f0f] p-6 rounded-[2.5rem] border border-white/5">
-              <div className="flex justify-between items-center mb-6"><h3 className="text-[10px] font-black text-red-500 uppercase tracking-widest flex items-center gap-2"><Wallet size={14}/> Daily Expenses</h3><button onClick={()=>setShowModal('expense')} className="text-red-500 bg-red-500/10 p-2 rounded-full"><Plus size={16}/></button></div>
-              <div className="space-y-3">
-                {data.expenses.map(e => (
-                  <div key={e.id} className="flex justify-between items-center bg-black/40 p-4 rounded-2xl border border-white/5">
-                    <div><span className="text-[10px] font-bold uppercase text-red-400">{e.reason}</span><p className="text-[8px] text-white/20 font-black uppercase">{e.date} • Rs.{Number(e.amount).toFixed(2)}</p></div>
-                    <button onClick={()=>deleteItem('expenses', e.id)} className="text-red-500/20"><Trash2 size={12}/></button>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
-        )}
-      </main>
-
-      <nav className="fixed bottom-8 inset-x-8 h-20 bg-[#0a0a0a]/90 backdrop-blur-3xl border border-white/5 rounded-[2.5rem] flex items-center justify-around z-50 shadow-2xl">
-        {[
-          { id: 'dashboard', icon: LayoutDashboard, label: 'Dash' },
-          { id: 'shops', icon: Store, label: 'Shops' },
-          { id: 'settings', icon: Settings, label: 'Setup' }
-        ].map(tab => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center gap-1 transition-all ${activeTab === tab.id ? 'text-[#d4af37] scale-110' : 'text-white/10'}`}>
-            <tab.icon size={22}/><span className="text-[7px] font-black uppercase tracking-widest">{tab.label}</span>
-          </button>
-        ))}
-      </nav>
-
-      {/* BILLING MODAL */}
-      {showModal === 'invoice' && (
-        <div className="fixed inset-0 bg-black z-[100] p-6 overflow-y-auto animate-in slide-in-from-bottom duration-500">
-          <div className="flex justify-between items-center mb-8 sticky top-0 bg-black/90 backdrop-blur pb-4 z-10">
-            <div><h2 className="text-xl font-black italic tracking-tighter uppercase">Generate Bill</h2><p className="text-[9px] text-[#d4af37] font-black uppercase tracking-widest">{selectedShop?.name}</p></div>
-            <button onClick={()=>setShowModal(null)} className="p-3 bg-white/5 rounded-full"><X/></button>
-          </div>
-          <div className="space-y-3 pb-44">
-            {data.brands.length === 0 && <p className="text-center text-[10px] text-white/20 py-10">No brands found. Go to Setup.</p>}
-            {data.brands.map(brand => (
-              <div key={brand.id} className="bg-[#0f0f0f] p-5 rounded-[2rem] border border-white/5 flex items-center justify-between">
-                <div><p className="text-[11px] font-black uppercase tracking-tight text-white/80">{brand.name}</p><p className="text-[9px] text-white/20 font-bold">Rs.{brand.price.toFixed(2)} | {brand.size}</p></div>
-                <div className="flex items-center gap-4 bg-black p-2 rounded-2xl border border-white/5">
-                  <button onClick={()=>setCart({...cart, [brand.id]: Math.max(0, (cart[brand.id]||0)-1)})} className="w-10 h-10 text-[#d4af37] font-black text-xl">-</button>
-                  <span className="text-xs font-black w-6 text-center">{cart[brand.id]||0}</span>
-                  <button onClick={()=>setCart({...cart, [brand.id]: (cart[brand.id]||0)+1})} className="w-10 h-10 text-[#d4af37] font-black text-xl">+</button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="fixed bottom-0 inset-x-0 p-8 bg-black/95 backdrop-blur-xl border-t border-white/5">
-            <div className="flex justify-between items-center mb-6"><span className="text-[10px] font-black text-white/20 uppercase tracking-widest">Grand Total</span><span className="text-2xl font-black text-[#d4af37]">Rs.{Object.entries(cart).reduce((sum, [id, qty]) => sum + (data.brands.find(b=>b.id===id)?.price||0)*qty, 0).toFixed(2)}</span></div>
-            <button onClick={submitOrder} className="w-full py-5 bg-[#d4af37] text-black font-black rounded-[1.5rem] uppercase text-[10px] tracking-widest shadow-xl shadow-[#d4af37]/20 active:scale-95 transition-all">Submit Order</button>
-          </div>
-        </div>
-      )}
-
-      {/* RECEIPT MODAL */}
-      {showModal === 'receipt' && lastOrder && (
-        <div className="fixed inset-0 bg-black/95 z-[110] flex items-center justify-center p-6 backdrop-blur-md animate-in zoom-in duration-300">
-          <div className="bg-[#0f0f0f] w-full max-w-sm p-8 rounded-[3rem] border border-[#d4af37]/30 shadow-2xl relative text-center">
-            <Crown className="text-[#d4af37] mx-auto mb-2" size={32}/>
-            <h3 className="font-black italic text-[#d4af37] uppercase tracking-tighter">SUCCESSFUL!</h3>
-            <p className="text-[8px] text-white/20 uppercase font-black mt-1 mb-6">ID: {lastOrder.id.slice(-8)}</p>
-            <div className="space-y-4 max-h-[35vh] overflow-y-auto no-scrollbar border-y border-white/5 py-6 mb-6">
-              {lastOrder.items.map((i, idx) => (
-                <div key={idx} className="flex justify-between text-[10px] uppercase font-bold px-2">
-                  <span className="text-white/40">{i.name} x {i.qty}</span>
-                  <span className="text-white">Rs.{i.subtotal.toFixed(2)}</span>
-                </div>
-              ))}
-            </div>
-            <div className="flex justify-between items-center mb-8 px-2">
-              <span className="text-[9px] font-black uppercase text-white/20">Net Payable</span>
-              <span className="text-xl font-black text-[#d4af37]">Rs.{lastOrder.total.toFixed(2)}</span>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => shareWhatsApp(lastOrder)} className="flex-1 py-4 bg-[#25D366] text-white font-black rounded-2xl text-[9px] uppercase flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20"><Send size={14}/> Share</button>
-              <button onClick={()=>setShowModal(null)} className="flex-1 py-4 bg-white/5 text-white font-black rounded-2xl text-[9px] uppercase">Close</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* SYSTEM MODALS */}
-      {['route', 'shop', 'brand', 'expense'].includes(showModal) && (
-        <div className="fixed inset-0 bg-black/95 z-[100] flex items-center justify-center p-8 backdrop-blur-md animate-in zoom-in duration-300">
-          <div className="bg-[#0f0f0f] w-full max-w-xs p-8 rounded-[3rem] border border-white/5 shadow-2xl">
-            <h3 className="text-center font-black text-[10px] mb-8 uppercase text-[#d4af37] tracking-widest">
-              {showModal === 'route' ? 'New Route' : showModal === 'shop' ? 'New Shop' : showModal === 'brand' ? 'New Brand' : 'New Expense'}
-            </h3>
-            <form onSubmit={e => {
-              e.preventDefault();
-              const f = e.target;
-              if(showModal === 'route') addItem('routes', { name: f.name.value.toUpperCase() });
-              if(showModal === 'shop') {
-                 if(data.routes.length === 0) return alert("Hadinama Route ekak hadanna!");
-                 addItem('shops', { name: f.name.value.toUpperCase(), area: f.area.value.toUpperCase(), routeId: f.routeId.value });
-              }
-              if(showModal === 'brand') addItem('brands', { name: f.name.value.toUpperCase(), size: f.size.value.toUpperCase(), price: parseFloat(f.price.value) });
-              if(showModal === 'expense') addItem('expenses', { reason: f.reason.value.toUpperCase(), amount: parseFloat(f.amount.value) });
-            }}>
-              {showModal === 'route' && <input name="name" placeholder="Route Name" className="w-full bg-black p-4 rounded-2xl mb-6 border border-white/5 text-xs font-bold uppercase outline-none" required />}
-              {showModal === 'shop' && (
-                <>
-                  <select name="routeId" className="w-full bg-black p-4 rounded-2xl mb-3 border border-white/5 text-xs font-bold uppercase text-white outline-none">
-                    {data.routes.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                  </select>
-                  <input name="name" placeholder="Shop Name" className="w-full bg-black p-4 rounded-2xl mb-3 border border-white/5 text-xs font-bold uppercase outline-none" required />
-                  <input name="area" placeholder="Area" className="w-full bg-black p-4 rounded-2xl mb-6 border border-white/5 text-xs font-bold uppercase outline-none" required />
-                </>
-              )}
-              {showModal === 'brand' && (
-                <>
-                  <input name="name" placeholder="Brand Name" className="w-full bg-black p-4 rounded-2xl mb-3 border border-white/5 text-xs font-bold uppercase outline-none" required />
-                  <input name="size" placeholder="Size (e.g. 1.5L)" className="w-full bg-black p-4 rounded-2xl mb-3 border border-white/5 text-xs font-bold uppercase outline-none" required />
-                  <input name="price" type="number" step="any" placeholder="Price" className="w-full bg-black p-4 rounded-2xl mb-6 border border-white/5 text-xs font-bold uppercase outline-none" required />
-                </>
-              )}
-              {showModal === 'expense' && (
-                <>
-                  <input name="reason" placeholder="Reason" className="w-full bg-black p-4 rounded-2xl mb-3 border border-white/5 text-xs font-bold uppercase outline-none" required />
-                  <input name="amount" type="number" step="any" placeholder="Amount" className="w-full bg-black p-4 rounded-2xl mb-6 border border-white/5 text-xs font-bold uppercase outline-none" required />
-                </>
-              )}
-              <button className="w-full py-4 bg-[#d4af37] text-black font-black rounded-2xl text-[10px] uppercase shadow-lg shadow-[#d4af37]/20 active:scale-95 transition-all">Save Record</button>
-              <button type="button" onClick={()=>setShowModal(null)} className="text-center block w-full mt-6 text-[8px] text-white/10 uppercase tracking-widest font-black">Cancel</button>
-            </form>
-          </div>
-        </div>
-      )}
-      <style>{`.no-scrollbar::-webkit-scrollbar { display: none; }`}</style>
-    </div>
-  );
-}
+export default App;
